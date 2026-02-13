@@ -1,109 +1,65 @@
-using LogCoreApi.Data; 
-using LogCoreApi.Entities; 
-using LogCoreApi.Filters; 
-using FluentValidation.AspNetCore; 
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Identity; 
+using System.Threading.RateLimiting;
+using FluentValidation.AspNetCore;
+using LogCoreApi.Data;
+using LogCoreApi.Filters;
+using LogCoreApi.Middlewares;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens; 
-using Serilog; 
-using System.Text; 
+using Serilog;
 
+
+
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
-
 Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
     .WriteTo.Console()
     .WriteTo.File("logs/log-.txt", rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
-
 builder.Host.UseSerilog();
-
 
 builder.Services.AddControllers(options =>
 {
-    options.Filters.Add<ModelStateValidationFilter>(); 
+    options.Filters.Add<ModelStateValidationFilter>();
 })
 .AddFluentValidation(fv =>
 {
-    fv.RegisterValidatorsFromAssemblyContaining<Program>(); 
+    fv.RegisterValidatorsFromAssemblyContaining<Program>();
 });
-
-
-builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options =>
-{
-    options.SuppressModelStateInvalidFilter = true;
-});
-
-
-
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
-
-
-
-
-builder.Services
-    .AddIdentityCore<AppUser>(options =>
-    {
-        options.Password.RequiredLength = 8; 
-        options.Password.RequireNonAlphanumeric = false;
-        options.Password.RequireUppercase = false; 
-        options.Password.RequireLowercase = false; 
-        options.Password.RequireDigit = true; 
-    })
-    .AddRoles<IdentityRole>() 
-    .AddEntityFrameworkStores<AppDbContext>() 
-    .AddSignInManager(); 
-
-
-
-var jwtKey = builder.Configuration["Jwt:Key"];
-var jwtIssuer = builder.Configuration["Jwt:Issuer"];
-var jwtAudience = builder.Configuration["Jwt:Audience"];
-
-builder.Services
-    .AddAuthentication(options =>
-    {
-        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme; 
-        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme; 
-    })
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true, 
-            ValidateAudience = true, 
-            ValidateLifetime = true, 
-            ValidateIssuerSigningKey = true, 
-
-            ValidIssuer = jwtIssuer, 
-            ValidAudience = jwtAudience, 
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey!)) 
-        };
-    });
-
-builder.Services.AddAuthorization(); 
-
-
-builder.Services.AddScoped<LogCoreApi.Services.Auth.TokenService>();
-
-
-builder.Services.AddAutoMapper(typeof(LogCoreApi.Mapping.NoteMappingProfile));
-
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-var app = builder.Build();
+builder.Services.AddDbContext<AppDbContext>(opt =>
+{
+    opt.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"));
+});
 
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddFixedWindowLimiter("fixed", limiterOptions =>
+    {
+        limiterOptions.PermitLimit = 60;
+        limiterOptions.Window = TimeSpan.FromMinutes(1);
+        limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        limiterOptions.QueueLimit = 0;
+    });
+});
+
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<AppDbContext>();
+
+var app = builder.Build();
 
 app.UseSerilogRequestLogging();
 
-
-app.UseMiddleware<LogCoreApi.Middlewares.GlobalExceptionMiddleware>();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<GlobalExceptionMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {
@@ -113,9 +69,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseRateLimiter();
 
-app.UseAuthentication(); 
-app.UseAuthorization();  
+app.UseAuthorization();
 
+app.MapHealthChecks("/health");
 app.MapControllers();
+
 app.Run();

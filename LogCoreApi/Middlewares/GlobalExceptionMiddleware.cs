@@ -1,99 +1,99 @@
-﻿using System.Net; 
-using Microsoft.AspNetCore.Mvc; 
-using Serilog; 
-using LogCoreApi.Exceptions; 
+﻿using System.Net;
+using System.Text.Json;
+using FluentValidation;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace LogCoreApi.Middlewares;
 
 public class GlobalExceptionMiddleware
 {
-    private readonly RequestDelegate _next; 
+    private readonly RequestDelegate _next;
+    private readonly ILogger<GlobalExceptionMiddleware> _logger;
 
-    private readonly IHostEnvironment _env;  
-
-    public GlobalExceptionMiddleware(RequestDelegate next, IHostEnvironment env)
+    public GlobalExceptionMiddleware(RequestDelegate next, ILogger<GlobalExceptionMiddleware> logger)
     {
-        _next = next; 
-        _env = env;   
+        _next = next;
+        _logger = logger;
     }
 
     public async Task Invoke(HttpContext context)
     {
         try
         {
-            await _next(context); 
+            await _next(context);
+        }
+        catch (ValidationException ex)
+        {
+            _logger.LogWarning(ex, "Validation error");
+
+            var modelState = new ModelStateDictionary();
+            foreach (var error in ex.Errors)
+            {
+                var key = string.IsNullOrWhiteSpace(error.PropertyName) ? "Validation" : error.PropertyName;
+                modelState.AddModelError(key, error.ErrorMessage);
+            }
+
+            var problem = new ValidationProblemDetails(modelState)
+            {
+                Title = "Validation failed",
+                Status = StatusCodes.Status400BadRequest,
+                Type = "https://httpstatuses.com/400",
+                Detail = "One or more validation errors occurred."
+            };
+
+            AddTraceAndCorrelation(context, problem);
+
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            context.Response.ContentType = "application/problem+json";
+
+            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            _logger.LogWarning(ex, "Resource not found");
+
+            var problem = new ProblemDetails
+            {
+                Title = "Not found",
+                Status = StatusCodes.Status404NotFound,
+                Type = "https://httpstatuses.com/404",
+                Detail = ex.Message
+            };
+
+            AddTraceAndCorrelation(context, problem);
+
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            context.Response.ContentType = "application/problem+json";
+
+            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
         }
         catch (Exception ex)
         {
-            
-            Log.Error(ex, "Unhandled exception. Path: {Path}", context.Request.Path);
+            _logger.LogError(ex, "Unhandled exception");
 
+            var problem = new ProblemDetails
+            {
+                Title = "Server error",
+                Status = StatusCodes.Status500InternalServerError,
+                Type = "https://httpstatuses.com/500",
+                Detail = "An unexpected error occurred."
+            };
 
-            
-            context.Response.ContentType = "application/json";
+            AddTraceAndCorrelation(context, problem);
 
-            
-            var (statusCode, problem) = CreateProblemDetails(context, ex);
+            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            context.Response.ContentType = "application/problem+json";
 
-            
-
-            context.Response.StatusCode = statusCode;
-            await context.Response.WriteAsJsonAsync(problem);
+            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
         }
     }
 
-    private (int StatusCode, ProblemDetails Problem) CreateProblemDetails(HttpContext context, Exception ex)
+    private static void AddTraceAndCorrelation(HttpContext context, ProblemDetails problem)
     {
-        
-        if (ex is NotFoundException)
-        {
-            var p = new ProblemDetails
-            {
+        problem.Extensions["traceId"] = context.TraceIdentifier;
 
-                Title = "Not Found", 
-
-                Status = (int)HttpStatusCode.NotFound, 
-                Detail = ex.Message, 
-                Instance = context.Request.Path
-                
-            };
-
-            return (p.Status.Value, p);
-        }
-
-        
-        if (ex is ValidationException vex)
-        {
-            var vp = new ValidationProblemDetails(vex.Errors)
-            {
-                Title = "Validation Error", 
-                Status = (int)HttpStatusCode.BadRequest, 
-                Detail = vex.Message, 
-                Instance = context.Request.Path 
-            };
-
-            return (vp.Status.Value, vp);
-        }
-
-        
-        var detail = _env.IsDevelopment()
-            ? ex.Message 
-            : "An unexpected error occurred."; 
-
-        var problem = new ProblemDetails
-        {
-
-
-            Title = "Server Error", 
-            Status = (int)HttpStatusCode.InternalServerError, 
-            Detail = detail, 
-
-            Instance = context.Request.Path 
-        };
-
-
-        return (problem.Status.Value, problem);
-
-
+        if (context.Items.TryGetValue("CorrelationId", out var cid))
+            problem.Extensions["correlationId"] = cid?.ToString();
     }
 }
