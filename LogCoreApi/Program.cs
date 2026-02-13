@@ -57,6 +57,7 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 app.UseSerilogRequestLogging();
+app.UseMiddleware<GlobalExceptionMiddleware>();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<GlobalExceptionMiddleware>();

@@ -1,7 +1,6 @@
-﻿using System.Net;
-using System.Text.Json;
+﻿using System.Text.Json;
 using FluentValidation;
-using Microsoft.AspNetCore.Mvc;
+using LogCoreApi.Models;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace LogCoreApi.Middlewares;
@@ -30,70 +29,59 @@ public class GlobalExceptionMiddleware
             var modelState = new ModelStateDictionary();
             foreach (var error in ex.Errors)
             {
-                var key = string.IsNullOrWhiteSpace(error.PropertyName) ? "Validation" : error.PropertyName;
+                var key = string.IsNullOrWhiteSpace(error.PropertyName)
+                    ? "Validation"
+                    : error.PropertyName;
+
                 modelState.AddModelError(key, error.ErrorMessage);
             }
 
-            var problem = new ValidationProblemDetails(modelState)
-            {
-                Title = "Validation failed",
-                Status = StatusCodes.Status400BadRequest,
-                Type = "https://httpstatuses.com/400",
-                Detail = "One or more validation errors occurred."
-            };
+            var details = modelState.ToDictionary(
+                kvp => kvp.Key,
+                kvp => kvp.Value.Errors.Select(e => e.ErrorMessage).ToArray()
+            );
 
-            AddTraceAndCorrelation(context, problem);
+            var response = ApiResponse<object>.Fail(
+                "ERR-400",
+                "Validation failed.",
+                context,
+                details
+            );
 
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
-            context.Response.ContentType = "application/problem+json";
+            context.Response.ContentType = "application/json";
 
-            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
+            await context.Response.WriteAsync(JsonSerializer.Serialize(response));
         }
         catch (KeyNotFoundException ex)
         {
             _logger.LogWarning(ex, "Resource not found");
 
-            var problem = new ProblemDetails
-            {
-                Title = "Not found",
-                Status = StatusCodes.Status404NotFound,
-                Type = "https://httpstatuses.com/404",
-                Detail = ex.Message
-            };
-
-            AddTraceAndCorrelation(context, problem);
+            var response = ApiResponse<object>.Fail(
+                "ERR-404",
+                ex.Message,
+                context
+            );
 
             context.Response.StatusCode = StatusCodes.Status404NotFound;
-            context.Response.ContentType = "application/problem+json";
+            context.Response.ContentType = "application/json";
 
-            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
+            await context.Response.WriteAsync(JsonSerializer.Serialize(response));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled exception");
 
-            var problem = new ProblemDetails
-            {
-                Title = "Server error",
-                Status = StatusCodes.Status500InternalServerError,
-                Type = "https://httpstatuses.com/500",
-                Detail = "An unexpected error occurred."
-            };
-
-            AddTraceAndCorrelation(context, problem);
+            var response = ApiResponse<object>.Fail(
+                "ERR-500",
+                "An unexpected error occurred.",
+                context
+            );
 
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            context.Response.ContentType = "application/problem+json";
+            context.Response.ContentType = "application/json";
 
-            await context.Response.WriteAsync(JsonSerializer.Serialize(problem));
+            await context.Response.WriteAsync(JsonSerializer.Serialize(response));
         }
-    }
-
-    private static void AddTraceAndCorrelation(HttpContext context, ProblemDetails problem)
-    {
-        problem.Extensions["traceId"] = context.TraceIdentifier;
-
-        if (context.Items.TryGetValue("CorrelationId", out var cid))
-            problem.Extensions["correlationId"] = cid?.ToString();
     }
 }
