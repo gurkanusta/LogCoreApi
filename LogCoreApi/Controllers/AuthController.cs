@@ -1,9 +1,10 @@
-﻿using Microsoft.AspNetCore.Identity; 
-using Microsoft.AspNetCore.Mvc; 
-using LogCoreApi.DTOs.Auth; 
-using LogCoreApi.Entities; 
-using LogCoreApi.Services.Auth; 
-using LogCoreApi.Exceptions; 
+﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using LogCoreApi.DTOs.Auth;
+using LogCoreApi.Entities;
+using LogCoreApi.Services.Auth;
+using LogCoreApi.Exceptions;
+using LogCoreApi.Models;
 
 namespace LogCoreApi.Controllers;
 
@@ -11,10 +12,10 @@ namespace LogCoreApi.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private readonly UserManager<AppUser> _userManager; 
-    private readonly SignInManager<AppUser> _signInManager; 
-    private readonly RoleManager<IdentityRole> _roleManager; 
-    private readonly TokenService _tokenService; 
+    private readonly UserManager<AppUser> _userManager;
+    private readonly SignInManager<AppUser> _signInManager;
+    private readonly RoleManager<IdentityRole> _roleManager;
+    private readonly TokenService _tokenService;
 
     public AuthController(
         UserManager<AppUser> userManager,
@@ -28,73 +29,57 @@ public class AuthController : ControllerBase
         _tokenService = tokenService;
     }
 
+    public record RegisterRequest(string Email, string Password);
+
     [HttpPost("register")]
-    public async Task<IActionResult> Register(RegisterRequestDto dto)
+    public async Task<IActionResult> Register([FromBody] RegisterRequest req)
     {
-        
-        if (string.IsNullOrWhiteSpace(dto.Email) || string.IsNullOrWhiteSpace(dto.Password))
-        {
-            throw new ValidationException(new Dictionary<string, string[]>
-            {
-                ["Email"] = new[] { "Email is required." },
-                ["Password"] = new[] { "Password is required." }
-            });
-        }
+        var existing = await _userManager.FindByEmailAsync(req.Email);
+        if (existing is not null)
+            return BadRequest(ApiResponse<object>.Fail("AUTH-400", "Email already in use.", HttpContext));
 
         var user = new AppUser
         {
-            UserName = dto.Email, 
-            Email = dto.Email 
+            UserName = req.Email,
+            Email = req.Email
         };
 
-        var result = await _userManager.CreateAsync(user, dto.Password); 
+        var result = await _userManager.CreateAsync(user, req.Password);
 
-        if (!result.Succeeded) 
+        if (!result.Succeeded)
         {
-            var errors = result.Errors.Select(e => e.Description).ToArray(); 
-            throw new ValidationException(new Dictionary<string, string[]>
-            {
-                ["Identity"] = errors
-            });
+            var details = result.Errors.Select(e => new { e.Code, e.Description }).ToArray();
+            return BadRequest(ApiResponse<object>.Fail("AUTH-400", "Register failed.", HttpContext, details));
         }
 
-        
-        if (!await _roleManager.RoleExistsAsync("User"))
-        {
-            await _roleManager.CreateAsync(new IdentityRole("User"));
-        }
+        const string defaultRole = "User";
+        if (!await _roleManager.RoleExistsAsync(defaultRole))
+            await _roleManager.CreateAsync(new IdentityRole(defaultRole));
 
-        
-        await _userManager.AddToRoleAsync(user, "User");
+        await _userManager.AddToRoleAsync(user, defaultRole);
 
-        
-        var (token, expires) = await _tokenService.CreateTokenAsync(user);
-
-        return Ok(new AuthResponseDto { Token = token, ExpiresAtUtc = expires });
+        return Ok(ApiResponse<object>.Ok(new { message = "Registered successfully." }, HttpContext));
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> Login(LoginRequestDto dto)
+    public async Task<IActionResult> Login([FromBody] LoginRequestDto dto)
     {
-        var user = await _userManager.FindByEmailAsync(dto.Email); 
+        var user = await _userManager.FindByEmailAsync(dto.Email);
 
-        if (user is null) 
-            throw new NotFoundException("User not found"); 
+        if (user is null)
+            return NotFound(ApiResponse<object>.Fail("AUTH-404", "User not found.", HttpContext));
 
-        
-        var result = await _signInManager.CheckPasswordSignInAsync(user, dto.Password, lockoutOnFailure: false);
+        var result = await _signInManager.CheckPasswordSignInAsync(user, dto.Password, lockoutOnFailure: true);
 
-        if (!result.Succeeded) 
+        if (!result.Succeeded)
+            return Unauthorized(ApiResponse<object>.Fail("AUTH-401", "Invalid email or password.", HttpContext));
+
+        var (token, expiresAtUtc) = await _tokenService.CreateTokenAsync(user);
+
+        return Ok(ApiResponse<object>.Ok(new AuthResponseDto
         {
-            throw new ValidationException(new Dictionary<string, string[]>
-            {
-                ["Credentials"] = new[] { "Invalid email or password." }
-            });
-        }
-
-        
-        var (token, expires) = await _tokenService.CreateTokenAsync(user);
-
-        return Ok(new AuthResponseDto { Token = token, ExpiresAtUtc = expires });
+            Token = token,
+            ExpiresAtUtc = expiresAtUtc
+        }, HttpContext));
     }
 }

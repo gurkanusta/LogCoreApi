@@ -1,6 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using LogCoreApi.Exceptions;
 
+
+using Microsoft.AspNetCore.Authorization;
 namespace LogCoreApi.Controllers;
 
 [ApiController]
@@ -26,6 +28,15 @@ public class TestController : ControllerBase
         throw new ValidationException(errors); 
     }
 
+    [Authorize]
+    [HttpGet("secure-ping")]
+    public IActionResult SecurePing()
+    {
+        return Ok(LogCoreApi.Models.ApiResponse<string>.Ok("ok", HttpContext));
+    }
+
+
+
 
 
 
@@ -34,4 +45,8 @@ public class TestController : ControllerBase
     {
         throw new Exception("DB connection failed"); 
     }
+
+
+
+
 }
